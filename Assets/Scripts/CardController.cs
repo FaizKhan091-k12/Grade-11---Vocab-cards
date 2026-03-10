@@ -8,7 +8,6 @@ using UnityEngine.EventSystems;
 [RequireComponent(typeof(CanvasGroup))]
 public class CardController : MonoBehaviour, IPointerClickHandler
 {
-    // ---------- Registry so we can cancel pending audio across all cards ----------
     static readonly List<CardController> allCards = new List<CardController>();
 
     [Header("FRONT")]
@@ -21,48 +20,37 @@ public class CardController : MonoBehaviour, IPointerClickHandler
 
     [Header("Flip Timing")]
     public float flipDuration = 0.35f;
-
-    [Tooltip("Delay only before FRONT -> BACK animation. Back->Front has NO delay.")]
     public float delayBeforeFlipAnimation = 0.2f;
 
     [Header("Click-lock (global)")]
-    [Tooltip("If TRUE, automatically lock clicks for all cards for (flipDuration + delayBeforeFlipAnimation).")]
     public bool lockClicksForFlipDuration = true;
-
-    [Tooltip("If lockClicksForFlipDuration is FALSE, this duration (seconds) will be used to lock clicks globally.")]
     public float globalClickLockSeconds = 0.35f;
 
-    // static field that stores until when clicks are disabled globally
-    static float clicksDisabledUntil = 0f; // Time.time value until which clicks are ignored across all cards
+    static float clicksDisabledUntil = 0f;
 
     [Header("Audio")]
     public AudioSource audioSource;
 
     [Header("Keyword Sound (front → back only)")]
-    public AudioClip keywordSound;            // SFX for front->back
+    public AudioClip keywordSound;
     [Range(0f, 1f)] public float keywordVolume = 0.9f;
 
     [Header("Flip Sound (voice-over)")]
-    public AudioClip flipSound;               // voice-over
+    public AudioClip flipSound;
     [Range(0f, 1f)] public float flipVolume = 1f;
 
-    [Tooltip("Play keywordSound + flipSound at the same time (front side only).")]
     public bool playBothSimultaneously = false;
-
-    [Tooltip("If TRUE, flipSound starts after animation (front side only).")]
     public bool playFlipSoundAfterAnimation = false;
 
     public float extraDelayBeforeFlipSound = 0f;
 
     [Header("Definition Sound (front → back only)")]
-    public AudioClip definitionSound;        // post-flip sound
+    public AudioClip definitionSound;
     [Range(0f, 1f)] public float definitionVolume = 1f;
 
     [Header("Definition Sound Delay (front → back only)")]
-    [Tooltip("Delay before playing definitionSound, AFTER flip animation ends.")]
     public float delayBeforeDefinitionSound = 0.25f;
 
-    // coroutine handles so we can cancel pending scheduled audio per-instance
     Coroutine delayedFlipSoundRoutine = null;
     Coroutine delayedDefinitionRoutine = null;
     Coroutine delayedVoiceRoutine = null;
@@ -70,24 +58,12 @@ public class CardController : MonoBehaviour, IPointerClickHandler
     bool isFlipped = false;
     bool flipping = false;
 
-    // -------------------------------------------------------------------------
-    void OnEnable()
-    {
-        if (!allCards.Contains(this)) allCards.Add(this);
-    }
-
-    void OnDisable()
-    {
-        if (allCards.Contains(this)) allCards.Remove(this);
-        // ensure we cancel any pending audio when disabled
-        CancelPendingAudio();
-    }
-
     void Awake()
     {
         if (audioSource == null)
         {
             audioSource = GetComponent<AudioSource>();
+
             if (audioSource == null)
             {
                 audioSource = gameObject.AddComponent<AudioSource>();
@@ -97,7 +73,48 @@ public class CardController : MonoBehaviour, IPointerClickHandler
         }
     }
 
-    // Convenience: cancels this instance's scheduled coroutines
+    void OnEnable()
+    {
+        if (!allCards.Contains(this))
+            allCards.Add(this);
+
+        ResetCard();
+    }
+
+    void OnDisable()
+    {
+        if (allCards.Contains(this))
+            allCards.Remove(this);
+
+        CancelPendingAudio();
+        flipping = false;
+    }
+
+    void ResetCard()
+    {
+        CancelPendingAudio();
+
+        isFlipped = false;
+        flipping = false;
+
+        transform.localEulerAngles = Vector3.zero;
+
+        if (frontKeyword != null)
+            frontKeyword.gameObject.SetActive(true);
+
+        if (backSide != null)
+            backSide.SetActive(false);
+    }
+
+    public void Setup(string keyword, Sprite infoSprite, string infoText)
+    {
+        frontKeyword.text = keyword;
+        backImage.sprite = infoSprite;
+        backInfo.text = infoText;
+
+        ResetCard();
+    }
+
     public void CancelPendingAudio()
     {
         if (delayedFlipSoundRoutine != null) { StopCoroutine(delayedFlipSoundRoutine); delayedFlipSoundRoutine = null; }
@@ -105,7 +122,6 @@ public class CardController : MonoBehaviour, IPointerClickHandler
         if (delayedVoiceRoutine != null) { StopCoroutine(delayedVoiceRoutine); delayedVoiceRoutine = null; }
     }
 
-    // Static helper: cancel pending audio on ALL CardController instances
     public static void CancelAllPendingAudioOnAllCards()
     {
         for (int i = 0; i < allCards.Count; i++)
@@ -115,83 +131,54 @@ public class CardController : MonoBehaviour, IPointerClickHandler
         }
     }
 
-    public void Setup(string keyword, Sprite infoSprite, string infoText)
-    {
-        frontKeyword.text = keyword;
-        backImage.sprite = infoSprite;
-        backInfo.text = infoText;
-
-        isFlipped = false;
-        flipping = false;
-
-        if (frontKeyword != null) frontKeyword.gameObject.SetActive(true);
-        if (backSide != null) backSide.SetActive(false);
-        transform.localEulerAngles = Vector3.zero;
-    }
-
-    // -------------------- Global click-lock check --------------------
-    // Call this to set global lock until a future time
     static void SetGlobalClickLock(float seconds)
     {
         float until = Time.time + Mathf.Max(0f, seconds);
-        // ensure we only extend the lock if it's later than what we already have
-        if (until > clicksDisabledUntil) clicksDisabledUntil = until;
+
+        if (until > clicksDisabledUntil)
+            clicksDisabledUntil = until;
     }
 
-    // Optionally call to clear lock immediately
     public static void ClearGlobalClickLock()
     {
         clicksDisabledUntil = 0f;
     }
 
-    [System.Obsolete]
     public void OnPointerClick(PointerEventData eventData)
     {
-        // If global click lock is active, ignore pointer clicks on all cards
         if (Time.time < clicksDisabledUntil)
-        {
-            // optionally you could play a "can't click" sound or visual feedback here
             return;
-        }
 
-        if (!flipping)
+        if (!flipping && gameObject.activeInHierarchy)
             StartCoroutine(FlipCoroutine());
     }
 
-    [System.Obsolete]
     IEnumerator FlipCoroutine()
     {
         flipping = true;
 
-        // set a global click lock so other cards can't be clicked for a bit
-        float lockSeconds = globalClickLockSeconds;
-        if (lockClicksForFlipDuration)
-        {
-            // use flipDuration + pre-delay as a sensible default so clicks are blocked for the animation time
-            lockSeconds = Mathf.Max(0f, flipDuration + delayBeforeFlipAnimation);
-        }
-        SetGlobalClickLock(lockSeconds);
-
         bool flippingFromFront = !isFlipped;
 
-        // ----------------- STOP/ cancel previous audio everywhere -----------------
-        // 1) stop currently playing audio sources (quick stop)
+        float lockSeconds = globalClickLockSeconds;
+
+        if (lockClicksForFlipDuration)
+        {
+            if (flippingFromFront)
+                lockSeconds = Mathf.Max(0f, (flipDuration * 2f) + delayBeforeFlipAnimation);
+            else
+                lockSeconds = flipDuration; // only animation time when returning to front
+        }
+
+        SetGlobalClickLock(lockSeconds);
+
         StopAllAudioSourcesInScene();
-
-        // 2) cancel any pending scheduled audio coroutines across all card instances
         CancelAllPendingAudioOnAllCards();
-
-        // Also cancel this instance's references (safe)
         CancelPendingAudio();
 
-        // =====================================================
-        // 🔊 AUDIO START (NO DELAY)
-        // =====================================================
         if (audioSource != null)
         {
             if (flippingFromFront)
             {
-                // FRONT -> BACK
                 if (playBothSimultaneously)
                 {
                     if (keywordSound != null)
@@ -208,8 +195,8 @@ public class CardController : MonoBehaviour, IPointerClickHandler
 
                         if (flipSound != null && !playFlipSoundAfterAnimation)
                         {
-                            // schedule flipSound after keywordSound's length + optional extra delay
-                            delayedFlipSoundRoutine = StartCoroutine(PlayDelayedFlipSound(keywordSound.length + extraDelayBeforeFlipSound));
+                            delayedFlipSoundRoutine =
+                                StartCoroutine(PlayDelayedFlipSound(keywordSound.length + extraDelayBeforeFlipSound));
                         }
                     }
                     else
@@ -221,21 +208,14 @@ public class CardController : MonoBehaviour, IPointerClickHandler
             }
             else
             {
-                // BACK -> FRONT: only play flipSound (voice) immediately
                 if (flipSound != null)
                     audioSource.PlayOneShot(flipSound, flipVolume);
             }
         }
 
-        // =====================================================
-        // 🕒 DELAY BEFORE ANIMATION (front side only)
-        // =====================================================
         if (flippingFromFront && delayBeforeFlipAnimation > 0f)
             yield return new WaitForSeconds(delayBeforeFlipAnimation);
 
-        // =====================================================
-        // 🎞 FLIP ANIMATION (first half)
-        // =====================================================
         float half = flipDuration / 2f;
         float t = 0f;
 
@@ -247,38 +227,28 @@ public class CardController : MonoBehaviour, IPointerClickHandler
             yield return null;
         }
 
-        // Swap sides
         isFlipped = !isFlipped;
-        if (frontKeyword != null) frontKeyword.gameObject.SetActive(!isFlipped);
-        if (backSide != null) backSide.SetActive(isFlipped);
 
-        // =====================================================
-        // 🔊 POST-FLIP / DEFINITION SOUND (schedule, front->back only)
-        // =====================================================
+        if (frontKeyword != null)
+            frontKeyword.gameObject.SetActive(!isFlipped);
+
+        if (backSide != null)
+            backSide.SetActive(isFlipped);
+
         if (flippingFromFront && definitionSound != null)
         {
-            if (delayedDefinitionRoutine != null) StopCoroutine(delayedDefinitionRoutine);
-            delayedDefinitionRoutine = StartCoroutine(PlayDelayedDefinitionSound(delayBeforeDefinitionSound));
+            delayedDefinitionRoutine =
+                StartCoroutine(PlayDelayedDefinitionSound(delayBeforeDefinitionSound));
         }
 
-        // =====================================================
-        // 🔊 FlipSound AFTER animation (if chosen)
-        // =====================================================
-        if (flippingFromFront && playFlipSoundAfterAnimation && !playBothSimultaneously)
+        if (flippingFromFront && playFlipSoundAfterAnimation && flipSound != null)
         {
-            if (delayedFlipSoundRoutine != null) StopCoroutine(delayedFlipSoundRoutine);
-            delayedFlipSoundRoutine = StartCoroutine(PlayDelayedFlipSound(extraDelayBeforeFlipSound));
+            delayedVoiceRoutine =
+                StartCoroutine(PlayDelayedVoice(extraDelayBeforeFlipSound));
         }
 
-        // If voice should play after animation (and not simultaneous), schedule it
-        if (flippingFromFront && !playBothSimultaneously && playFlipSoundAfterAnimation && flipSound != null)
-        {
-            if (delayedVoiceRoutine != null) StopCoroutine(delayedVoiceRoutine);
-            delayedVoiceRoutine = StartCoroutine(PlayDelayedVoice(extraDelayBeforeFlipSound));
-        }
-
-        // second half: rotate 90 -> 0
         t = 0f;
+
         while (t < half)
         {
             t += Time.deltaTime;
@@ -287,43 +257,50 @@ public class CardController : MonoBehaviour, IPointerClickHandler
             yield return null;
         }
 
-        // finalize
         transform.localEulerAngles = Vector3.zero;
+
+        yield return null;
+
         flipping = false;
     }
 
-    // Stop all AudioSources in the scene (quick method). If you'd prefer to only stop this card's audio,
-    // replace this with audioSource.Stop() or add tag checks to skip music.
-    [System.Obsolete]
     void StopAllAudioSourcesInScene()
     {
         AudioSource[] all = FindObjectsOfType<AudioSource>();
+
         foreach (var s in all)
-        {
             s.Stop();
-        }
     }
 
     IEnumerator PlayDelayedVoice(float delay)
     {
-        if (delay > 0f) yield return new WaitForSeconds(delay);
+        if (delay > 0f)
+            yield return new WaitForSeconds(delay);
+
         delayedVoiceRoutine = null;
+
         if (audioSource != null && flipSound != null)
             audioSource.PlayOneShot(flipSound, flipVolume);
     }
 
     IEnumerator PlayDelayedFlipSound(float delay)
     {
-        if (delay > 0f) yield return new WaitForSeconds(delay);
+        if (delay > 0f)
+            yield return new WaitForSeconds(delay);
+
         delayedFlipSoundRoutine = null;
+
         if (audioSource != null && flipSound != null)
             audioSource.PlayOneShot(flipSound, flipVolume);
     }
 
     IEnumerator PlayDelayedDefinitionSound(float delay)
     {
-        if (delay > 0f) yield return new WaitForSeconds(delay);
+        if (delay > 0f)
+            yield return new WaitForSeconds(delay);
+
         delayedDefinitionRoutine = null;
+
         if (audioSource != null && definitionSound != null)
             audioSource.PlayOneShot(definitionSound, definitionVolume);
     }
